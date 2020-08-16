@@ -15,14 +15,12 @@
 # limitations under the License.
 """ Finetuning the library models for sequence classification on GLUE (Bert, XLM, XLNet, RoBERTa, Albert, XLM-RoBERTa)."""
 
-
 import dataclasses
 import logging
 import os
 import sys
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Optional
-
 import numpy as np
 
 from transformers import AutoConfig, AutoModelForSequenceClassification, AutoTokenizer, EvalPrediction, GlueDataset
@@ -37,6 +35,10 @@ from transformers import (
     set_seed,
 )
 
+
+# 指定训练模型的GPU是哪一个，但是仍然有问题，如果我想在n个GPU上并行训练，该怎么做？
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 logger = logging.getLogger(__name__)
 
@@ -66,8 +68,8 @@ def main():
     # or by passing the --help flag to this script.
     # We now keep distinct sets of args, for a cleaner separation of concerns.
 
+    # step1. 解析参数
     parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments))
-
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         # If we pass only one argument to the script and it's the path to a json file,
         # let's parse it to get our arguments.
@@ -75,6 +77,9 @@ def main():
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
+    # step2.判断输出文件是否已经存在
+    # 为什么要判断一下？ 难道是想我们继续从之前的模型开始输入？ 那么这里就可以有一个优化，如果是
+    # 模型已经有过输出了，那么就从这个输出开始继续训练
     if (
         os.path.exists(training_args.output_dir)
         and os.listdir(training_args.output_dir)
@@ -85,6 +90,7 @@ def main():
             f"Output directory ({training_args.output_dir}) already exists and is not empty. Use --overwrite_output_dir to overcome."
         )
 
+    # step3. 配置日志信息
     # Setup logging
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
@@ -101,16 +107,18 @@ def main():
     )
     logger.info("Training/evaluation parameters %s", training_args)
 
+    # step 4. 设置随机种子 ？ =》 有什么用？
     # Set seed
     set_seed(training_args.seed)
 
+    # step 5.下面这个操作是什么意思？
     try:
         num_labels = glue_tasks_num_labels[data_args.task_name]
         output_mode = glue_output_modes[data_args.task_name]
     except KeyError:
         raise ValueError("Task not found: %s" % (data_args.task_name))
 
-    # Load pretrained model and tokenizer
+    # step 6. Load pretrained model and tokenizer
     #
     # Distributed training:
     # The .from_pretrained methods guarantee that only one local process can concurrently
@@ -133,21 +141,32 @@ def main():
         cache_dir=model_args.cache_dir,
     )
 
-    # Get datasets
+    # step7. Get datasets
+    # 分别为train, eval, test 设置数据集
     train_dataset = (
-        GlueDataset(data_args, tokenizer=tokenizer, cache_dir=model_args.cache_dir) if training_args.do_train else None
+        GlueDataset(data_args,
+                    tokenizer=tokenizer,
+                    cache_dir=model_args.cache_dir) if training_args.do_train else None
     )
     eval_dataset = (
-        GlueDataset(data_args, tokenizer=tokenizer, mode="dev", cache_dir=model_args.cache_dir)
+        GlueDataset(data_args,
+                    tokenizer=tokenizer,
+                    mode="dev",
+                    cache_dir=model_args.cache_dir)
         if training_args.do_eval
         else None
     )
     test_dataset = (
-        GlueDataset(data_args, tokenizer=tokenizer, mode="test", cache_dir=model_args.cache_dir)
+        GlueDataset(data_args,
+                    tokenizer=tokenizer,
+                    mode="test",
+                    cache_dir=model_args.cache_dir)
         if training_args.do_predict
         else None
     )
 
+    # step 8. 定义评价时的metric
+    # 这里进行了多层的函数嵌套 => 以task_name = mrpc 为例
     def build_compute_metrics_fn(task_name: str) -> Callable[[EvalPrediction], Dict]:
         def compute_metrics_fn(p: EvalPrediction):
             if output_mode == "classification":
@@ -155,10 +174,16 @@ def main():
             elif output_mode == "regression":
                 preds = np.squeeze(p.predictions)
             return glue_compute_metrics(task_name, preds, p.label_ids)
+        return compute_metrics_fn   # 返回的是个函数
 
-        return compute_metrics_fn
 
-    # Initialize our Trainer
+    # step 9.Initialize our Trainer
+    """ 分别来谈一下其中参数的作用
+    01.compute_metrics (Callable[[EvalPrediction], Dict], optional):
+     The function that will be used to compute metrics at evaluation.
+     Must take a EvalPrediction and return a dictionary string to metric values.
+    02. 通常的情况是，程序运行到这一步，如果GPU的内存不足，就会报 CUDA error: out of memory 
+    """
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -167,10 +192,11 @@ def main():
         compute_metrics=build_compute_metrics_fn(data_args.task_name),
     )
 
-    # Training
+    # step 10.Training
     if training_args.do_train:
-        trainer.train(
-            model_path=model_args.model_name_or_path if os.path.isdir(model_args.model_name_or_path) else None
+        trainer.train( # 开始真正训练的入口
+            model_path=model_args.model_name_or_path
+            if os.path.isdir(model_args.model_name_or_path) else None
         )
         trainer.save_model()
         # For convenience, we also re-save the tokenizer to the same directory,
@@ -178,7 +204,7 @@ def main():
         if trainer.is_world_master():
             tokenizer.save_pretrained(training_args.output_dir)
 
-    # Evaluation
+    # step 11.Evaluation
     eval_results = {}
     if training_args.do_eval:
         logger.info("*** Evaluate ***")
@@ -202,7 +228,7 @@ def main():
                 with open(output_eval_file, "w") as writer:
                     logger.info("***** Eval results {} *****".format(eval_dataset.args.task_name))
                     for key, value in eval_result.items():
-                        logger.info("  %s = %s", key, value)
+                        logger.info("  %s = %s", key, value)  # 打日志的同时写入到文件中
                         writer.write("%s = %s\n" % (key, value))
 
             eval_results.update(eval_result)
