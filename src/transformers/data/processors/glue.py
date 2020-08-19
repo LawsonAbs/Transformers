@@ -552,7 +552,7 @@ class WnliProcessor(DataProcessor):
             examples.append(InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label))
         return examples
 
-
+# 这是什么意思？=> 用于区分任务的标签
 glue_tasks_num_labels = {
     "cola": 2,
     "mnli": 3,

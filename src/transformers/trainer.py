@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
+torch.set_printoptions(profile="full") # 输出tensor的整个部分
 from packaging import version
 from torch import nn
 from torch.utils.data.dataloader import DataLoader
@@ -159,6 +160,8 @@ class Trainer:
             A tuple containing the optimizer and the scheduler to use. Will default to an instance of
             :class:`~transformers.AdamW` on your model and a scheduler given by
             :func:`~transformers.get_linear_schedule_with_warmup` controlled by :obj:`args`.
+        kwargs:
+            Deprecated keyword arguments.
     """
 
     def __init__(
@@ -169,9 +172,9 @@ class Trainer:
         train_dataset: Optional[Dataset] = None,
         eval_dataset: Optional[Dataset] = None,
         compute_metrics: Optional[Callable[[EvalPrediction], Dict]] = None,
-        prediction_loss_only=False,
         tb_writer: Optional["SummaryWriter"] = None,
         optimizers: Tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LambdaLR] = (None, None),
+        **kwargs,
     ):
         self.model = model.to(args.device)
         self.args = args
@@ -179,9 +182,16 @@ class Trainer:
         self.train_dataset = train_dataset
         self.eval_dataset = eval_dataset
         self.compute_metrics = compute_metrics
-        self.prediction_loss_only = prediction_loss_only
         self.optimizer, self.lr_scheduler = optimizers
         self.tb_writer = tb_writer
+        if "prediction_loss_only" in kwargs:
+            warnings.warn(
+                "Passing `prediction_loss_only` as a keyword argument is deprecated and won't be possible in a future version. Use `args.prediction_loss_only` instead.",
+                FutureWarning,
+            )
+            self.args.prediction_loss_only = kwargs.pop("prediction_loss_only")
+        assert kwargs == {}, f"Unexpected keyword arguments: {list(kwargs.keys())}."
+
         if tb_writer is None and is_tensorboard_available() and self.is_world_process_zero():
             self.tb_writer = SummaryWriter(log_dir=self.args.logging_dir)
         if not is_tensorboard_available():
@@ -240,8 +250,8 @@ class Trainer:
         """
         Returns the training :class:`~torch.utils.data.DataLoader`.
 
-        Will use no sampler if :obj:`self.train_dataset` is a :obj:`torch.utils.data.IterableDataset`, a random sampler
-        (adapted to distributed training if necessary) otherwise.
+        Will use no sampler if :obj:`self.train_dataset` is a :obj:`torch.utils.data.IterableDataset`,
+         a random sampler   (adapted to distributed training if necessary) otherwise.
 
         Subclass and override this method if you want to inject some custom behavior.
         """
@@ -322,8 +332,9 @@ class Trainer:
         """
         Setup the optimizer and the learning rate scheduler.
 
-        We provide a reasonable default that works well. If you want to use something else, you can pass a tuple in the
-        Trainer's init through :obj:`optimizers`, or subclass and override this method in a subclass.
+        We provide a reasonable default that works well. If you want to use something else,
+        you can pass a tuple in the Trainer's init through :obj:`optimizers`,
+        or subclass and override this method in a subclass.
         """
         if self.optimizer is None:
             no_decay = ["bias", "LayerNorm.weight"]
@@ -345,7 +356,9 @@ class Trainer:
             )
         if self.lr_scheduler is None:
             self.lr_scheduler = get_linear_schedule_with_warmup(
-                self.optimizer, num_warmup_steps=self.args.warmup_steps, num_training_steps=num_training_steps
+                self.optimizer,
+                num_warmup_steps=self.args.warmup_steps,
+                num_training_steps=num_training_steps
             )
 
     def setup_wandb(self):
@@ -428,8 +441,8 @@ class Trainer:
 
         Args:
             model_path (:obj:`str`, `optional`):
-                Local path to the model if the model to train has been instantiated from a local path. If present,
-                training will resume from the optimizer/scheduler states loaded here.
+                Local path to the model if the model to train has been instantiated from a local path.
+                If present, training will resume from the optimizer/scheduler states loaded here.
         """
         train_dataloader = self.get_train_dataloader()
         if self.args.max_steps > 0:
@@ -437,7 +450,7 @@ class Trainer:
             num_train_epochs = (
                 self.args.max_steps // (len(train_dataloader) // self.args.gradient_accumulation_steps) + 1
             )
-        else:
+        else: # 下面这个t_total 是计算多次train_epoch 中总共使用的训练数据
             t_total = int(len(train_dataloader) // self.args.gradient_accumulation_steps * self.args.num_train_epochs)
             num_train_epochs = self.args.num_train_epochs
 
@@ -455,7 +468,7 @@ class Trainer:
             )
             self.lr_scheduler.load_state_dict(torch.load(os.path.join(model_path, "scheduler.pt")))
 
-        model = self.model
+        model = self.model  # 这个时候对模型进行赋值
         if self.args.fp16 and _use_apex:
             if not is_apex_available():
                 raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
@@ -521,7 +534,10 @@ class Trainer:
         logging_loss = 0.0
         model.zero_grad()
         train_iterator = trange(
-            epochs_trained, int(num_train_epochs), desc="Epoch", disable=not self.is_local_process_zero()
+            epochs_trained,
+            int(num_train_epochs),
+            desc="Epoch",
+            disable=not self.is_local_process_zero()
         )
         for epoch in train_iterator:
             if isinstance(train_dataloader, DataLoader) and isinstance(train_dataloader.sampler, DistributedSampler):
@@ -539,13 +555,61 @@ class Trainer:
             if self.args.past_index >= 0:
                 self._past = None
 
-            for step, inputs in enumerate(epoch_iterator):
-
+            for step, inputs in enumerate(epoch_iterator): # type(input) <class 'dict'>
                 # Skip past any already trained steps if resuming training
                 if steps_trained_in_current_epoch > 0:
                     steps_trained_in_current_epoch -= 1
                     continue
 
+                """
+                01.Perform a training step on a batch of inputs.
+                训练入口，注意这里的model。
+                
+                02.inputs 是一个字典，其包括四个键值对。
+                labels, inputs_ids, attention_mask, token_type_ids 第一个是从文本中得到的分类信息；
+                而后面三个都是从文本中进行tokenization 得到的。
+                
+                下面给出各个键的例子数据：
+                labels tensor([0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 0, 1, 1,
+                                0, 0, 1, 1, 1, 1, 1, 1]) 【因为是32一batch，所以每batch 都有32个标签】
+                
+                input_ids tensor([[  101,  1337, 26017,  1108,  6024,  1118,  2563,  1708, 18874,   112,
+                                   188,  2313,  1107, 25537, 19265,   112,   188,  2906,   119,   102,
+                                  2563,  1708, 18874,   112,   188,  2313,  1144,  6315,  4482, 17818,
+                                 16589,  1103,  2906,   119,   102,     0,     0,     0,     0,     0,
+                                 0,     0,     0,     0,     0,     0,     0,     0,     0,     0,
+                                 0,     0,     0,     0,     0,     0,     0,     0,     0,     0,
+                                 0,     0,     0,     0,     0,     0,     0,     0,     0,     0,
+                                 0,     0,     0,     0,     0,     0,     0,     0,     0,     0,
+                                 0,     0,     0,     0,     0,     0,     0,     0,     0,     0,
+                                 0,     0,     0,     0,     0,     0,     0,     0,     0,     0,
+                                 0,     0,     0,     0,     0,     0,     0,     0,     0,     0,
+                                 0,     0,     0,     0,     0,     0,     0,     0,     0,     0,
+                                 0,     0,     0,     0,     0,     0,     0,     0],                                                
+                                [....]
+                                ]
+                可以看到这里有padding操作，而且length = 128。
+                同理，attention_mask 也是如此。
+                attention_mask tensor([[1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+                                     1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                     0, 0, 0, 0, 0, 0, 0, 0],
+                再对应看一下token_type_ids，也是
+                token_type_ids tensor([[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1,
+                                     1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                     0, 0, 0, 0, 0, 0, 0, 0],
+                                     [...]
+                                     ]                                                                           
+                """
+                # print(inputs.get('input_ids'))
+                # for key,value in inputs.items():
+                #     print(key,value)
+                # 下面就开始真正的解下游任务了
                 tr_loss += self.training_step(model, inputs)
 
                 if (step + 1) % self.args.gradient_accumulation_steps == 0 or (
@@ -603,9 +667,7 @@ class Trainer:
                             assert model is self.model, f"Model {model} should be a reference to self.model"
                         # Save model checkpoint
                         output_dir = os.path.join(self.args.output_dir, f"{PREFIX_CHECKPOINT_DIR}-{self.global_step}")
-
                         self.save_model(output_dir)
-
                         if self.is_world_process_zero():
                             self._rotate_checkpoints()
 
@@ -620,6 +682,8 @@ class Trainer:
                 if self.args.max_steps > 0 and self.global_step > self.args.max_steps:
                     epoch_iterator.close()
                     break
+            # end-for
+
             if self.args.max_steps > 0 and self.global_step > self.args.max_steps:
                 train_iterator.close()
                 break
@@ -699,7 +763,8 @@ class Trainer:
         self, inputs: Dict[str, Union[torch.Tensor, Any]], model: nn.Module
     ) -> Dict[str, Union[torch.Tensor, Any]]:
         """
-        Prepare :obj:`inputs` before feeding them to the model, converting them to tensors if they are not already and
+        Prepare :obj:`inputs` before feeding them to the model,
+        converting them to tensors if they are not already and
         handling potential state.
         """
         for k, v in inputs.items():
@@ -723,7 +788,8 @@ class Trainer:
             inputs (:obj:`Dict[str, Union[torch.Tensor, Any]]`):
                 The inputs and targets of the model.
 
-                The dictionary will be unpacked before being fed to the model. Most models expect the targets under the
+                The dictionary will be unpacked before being fed to the model.
+                Most models expect the targets under the
                 argument :obj:`labels`. Check your model's documentation for all accepted arguments.
 
         Return:
@@ -736,9 +802,14 @@ class Trainer:
             )
             return self._training_step(model, inputs, self.optimizer)
 
-        model.train()
+        model.train() # Sets the module in training mode
         inputs = self._prepare_inputs(inputs, model)
 
+        """
+        注意这里的model 与'我们平常自己定义的模型得到的实例' 相类似。也就是说这里是真正'脱离BERT'
+        的下游模型。但是在这里，我们仍然使用BERT作为我们的下游模型【因为这里的model是BertForSequenceClassification
+        类的一个实例，而这个类的实例是根据我们运行任务给出的命令中的参数自动找出来的】，实现一个分类任务。                                
+        """
         if self.args.fp16 and _use_native_amp:
             with autocast():
                 outputs = model(**inputs)
@@ -951,7 +1022,9 @@ class Trainer:
             )
             return self._prediction_loop(dataloader, description, prediction_loss_only=prediction_loss_only)
 
-        prediction_loss_only = prediction_loss_only if prediction_loss_only is not None else self.prediction_loss_only
+        prediction_loss_only = (
+            prediction_loss_only if prediction_loss_only is not None else self.args.prediction_loss_only
+        )
 
         model = self.model
         # multi-gpu eval
