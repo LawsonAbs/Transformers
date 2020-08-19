@@ -579,20 +579,23 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin):
 
         logger.info("Model weights saved in {}".format(output_model_file))
 
+    # 下面这个 @classmethod 是什么意思？
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
         r"""
         Instantiate a pretrained pytorch model from a pre-trained model configuration.
 
-        The model is set in evaluation mode by default using ``model.eval()`` (Dropout modules are deactivated).
+        The model is set in evaluation mode by default using ``model.eval()``
+        (Dropout modules are deactivated).
         To train the model, you should first set it back in training mode with ``model.train()``.
 
-        The warning `Weights from XXX not initialized from pretrained model` means that the weights of XXX do not come
-        pretrained with the rest of the model. It is up to you to train those weights with a downstream fine-tuning
-        task.
+        The warning `Weights from XXX not initialized from pretrained model`
+        means that the weights of XXX do not come
+        pretrained with the rest of the model.
+        It is up to you to train those weights with a downstream fine-tuning task.
 
-        The warning `Weights from XXX not used in YYY` means that the layer XXX is not used by YYY, therefore those
-        weights are discarded.
+        The warning `Weights from XXX not used in YYY` means that the layer XXX is not used by YYY,
+        therefore those weights are discarded.
 
         Parameters:
             pretrained_model_name_or_path (:obj:`str`, `optional`):
@@ -698,8 +701,11 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin):
         use_cdn = kwargs.pop("use_cdn", True)
 
         # Load config if we don't provide a configuration
+        # 如果我们在刚开始的时候，没有提供配置，那么这一步就会实现自定义的一个配置，
+        # 这个配置就会根据 pretrained_model_name_or_path 来初始化
         if not isinstance(config, PretrainedConfig):
             config_path = config if config is not None else pretrained_model_name_or_path
+            # 下面又会根据config的from_pretrained()函数进行配置  => configuration_utils.py 中的方法
             config, model_kwargs = cls.config_class.from_pretrained(
                 config_path,
                 *model_args,
@@ -715,7 +721,9 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin):
             model_kwargs = kwargs
 
         # Load model
+        # 因为针对不同的模型地址输入，这里提供了多种判断方式用于加载模型
         if pretrained_model_name_or_path is not None:
+            # case 1. 实际文件地址加载
             if os.path.isdir(pretrained_model_name_or_path):
                 if from_tf and os.path.isfile(os.path.join(pretrained_model_name_or_path, TF_WEIGHTS_NAME + ".index")):
                     # Load from a TF 1.0 checkpoint
@@ -733,8 +741,12 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin):
                             pretrained_model_name_or_path,
                         )
                     )
+
+            # case 2.是否是一个http 文件
             elif os.path.isfile(pretrained_model_name_or_path) or is_remote_url(pretrained_model_name_or_path):
                 archive_file = pretrained_model_name_or_path
+
+            # case 3.暂不清楚
             elif os.path.isfile(pretrained_model_name_or_path + ".index"):
                 assert (
                     from_tf
@@ -742,11 +754,14 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin):
                     pretrained_model_name_or_path + ".index"
                 )
                 archive_file = pretrained_model_name_or_path + ".index"
+            # case 4.根据文件名标志解析出模型地址，然后下载得到
+            # 比如说，如果我们提供的参数是 pretrained_model_name_or_path = 'bert-base-uncased' ，那么得到的就是
+            # archive_file = 'https://cdn.huggingface.co/bert-base-uncased-pytorch_model.bin'
             else:
                 archive_file = hf_bucket_url(
-                    pretrained_model_name_or_path,
-                    filename=(TF2_WEIGHTS_NAME if from_tf else WEIGHTS_NAME),
-                    use_cdn=use_cdn,
+                    pretrained_model_name_or_path, # 以'bert-base-uncased' 为例
+                    filename=(TF2_WEIGHTS_NAME if from_tf else WEIGHTS_NAME), # 用以区分是pytorch 或是 tf的模型
+                    use_cdn=use_cdn,  # 是否使用内容分发网络，通常为true
                 )
 
             try:
@@ -769,18 +784,22 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin):
                 )
                 raise EnvironmentError(msg)
 
+            # 如果解析出来的地址 与实际下载的地址相同，那么就应该下载了
             if resolved_archive_file == archive_file:
                 logger.info("loading weights file {}".format(archive_file))
-            else:
+            else: # 否则直接从cache中直接获取即可
                 logger.info("loading weights file {} from cache at {}".format(archive_file, resolved_archive_file))
         else:
             resolved_archive_file = None
 
         # Instantiate model.
+        # 注意这里又使用到了那个 classmethod 装饰器的知识
+        # 这里的cls就是外层调用 from_pretrained()方法的那个类，在本例子中就是BertModel
+        # 然后就相当于就是直接实例化BertModel这个类，即调用 其 __init__()函数，得到它的一个实例
         model = cls(config, *model_args, **model_kwargs)
 
         if state_dict is None and not from_tf:
-            try:
+            try: # 如果state_dict 仍然是None的话，那么就直接加载模型  => torch.load()方法
                 state_dict = torch.load(resolved_archive_file, map_location="cpu")
             except Exception:
                 raise OSError(
@@ -842,6 +861,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin):
                         load(child, prefix + name + ".")
 
             # Make sure we are able to load base models as well as derived models (with heads)
+            # 这里的 with heads 是什么意思？
             start_prefix = ""
             model_to_load = model
             has_prefix_module = any(s.startswith(cls.base_model_prefix) for s in state_dict.keys())
