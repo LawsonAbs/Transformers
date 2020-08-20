@@ -497,6 +497,7 @@ class BertEncoder(nn.Module):
         )
 
 
+# 不是很理解这个类是用于做什么的
 class BertPooler(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -506,7 +507,7 @@ class BertPooler(nn.Module):
     def forward(self, hidden_states):
         # We "pool" the model by simply taking the hidden state corresponding
         # to the first token.
-        first_token_tensor = hidden_states[:, 0]
+        first_token_tensor = hidden_states[:, 0] #
         pooled_output = self.dense(first_token_tensor)
         pooled_output = self.activation(pooled_output)
         return pooled_output
@@ -693,6 +694,8 @@ BERT_INPUTS_DOCSTRING = r"""
 """
 
 
+
+# 下面这玩意儿会自动出现文档中
 @add_start_docstrings(
     "The bare Bert Model transformer outputting raw hidden-states without any specific head on top.",
     BERT_START_DOCSTRING,
@@ -720,7 +723,7 @@ class BertModel(BertPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
         self.config = config
-
+        # 学习下面这三个东西就是接下来的重点任务
         self.embeddings = BertEmbeddings(config)
         self.encoder = BertEncoder(config)
         self.pooler = BertPooler(config)
